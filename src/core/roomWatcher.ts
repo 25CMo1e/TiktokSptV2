@@ -79,12 +79,22 @@ export class RoomWatcher {
     });
 
     cast.on('message', (messages) => {
-      // 检查下播消息
+      // 检查开播/下播消息
       for (const msg of messages) {
-        if (msg.method === CastMethod.CONTROL && msg.room?.status !== RoomStatus.LIVING) {
-          this.statusMap.set(roomNum, false);
-          this.onStatusChange?.(roomNum, 'end', '主播已下播');
-          cast.close();
+        if (msg.method === CastMethod.CONTROL) {
+          if (msg.room?.status === RoomStatus.LIVING) {
+            // 主播开播
+            this.statusMap.set(roomNum, true);
+            this.onStatusChange?.(roomNum, 'living', msg.room);
+            // 如果未连接，则连接
+            if (!this.statusMap.get(roomNum)) {
+              this.connectRoom(roomNum);
+            }
+          } else if (msg.room?.status === RoomStatus.END) {
+            // 主播下播
+            this.statusMap.set(roomNum, false);
+            this.onStatusChange?.(roomNum, 'end', '主播已下播');
+          }
           break;
         }
       }

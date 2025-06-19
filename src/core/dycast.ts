@@ -506,9 +506,8 @@ export class DyCast {
         this._connect(params);
       } else {
         // 主播未开播
-        const liveStatus = this.getLiveStatus();
         this.wsRoomStatus = WSRoomStatus.CLOSED;
-        this.emitter.emit('close', DyCastCloseCode.LIVE_END, liveStatus.msg);
+        this.emitter.emit('close', DyCastCloseCode.LIVE_END, '主播未开播');
       }
     } catch (err) {
       // 过程错误
@@ -591,9 +590,15 @@ export class DyCast {
         break;
     }
     this._afterClose();
-    if (this.shouldReconnect || this.reconnectCount > 0) {
-      // 需要重连
-      this.reconnect();
+    
+    // 如果是主播未开播导致的关闭，等待 WebSocket 事件
+    if (code === DyCastCloseCode.LIVE_END) {
+      this.wsRoomStatus = WSRoomStatus.CLOSED;
+      this.emitter.emit('close', code, msg);
+    } else if (code !== DyCastCloseCode.NORMAL) {
+      // 其他非正常关闭，等待 WebSocket 事件
+      this.wsRoomStatus = WSRoomStatus.CLOSED;
+      this.emitter.emit('close', code, msg);
     } else {
       // 正常关闭
       this.emitter.emit('close', code, msg);
@@ -650,21 +655,27 @@ export class DyCast {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.close(DyCastCloseCode.RECONNECTING, '因重连而关闭');
     }
-    this.shouldReconnect = !1;
-    const opts: DyCastOptions = Object.assign({}, this.options, {
-      cursor: this.cursor.cursor,
-      internal_ext: this.cursor.internalExt
-    });
+    
     this.reconnectCount++;
     if (this.reconnectCount > this.maxReconnectCount) {
       CLog.error('已超过最大重连次数，请稍后重试');
       this.emitter.emit('error', Error('已超过最大重连次数，请稍后重试'));
       return;
     }
+
+    const delay = this.getReconnectDelay();
     this.wsRoomStatus = WSRoomStatus.RECONNECTING;
     this.emitter.emit('reconnecting', this.reconnectCount);
-    this.isReconnecting = true;
-    this._connect(opts);
+    
+    // 延迟重连
+    setTimeout(() => {
+      this.isReconnecting = true;
+      const opts: DyCastOptions = Object.assign({}, this.options, {
+        cursor: this.cursor.cursor,
+        internal_ext: this.cursor.internalExt
+      });
+      this._connect(opts);
+    }, delay);
   }
 
   /**
@@ -716,7 +727,8 @@ export class DyCast {
     CLog.error(`DyCast Cannot Receive Message => after ${tmp} ms`);
     // 重连
     this.emitter.emit('reconnecting', this.reconnectCount, DyCastCloseCode.CANNOT_RECEIVE, '客户端无法正常接收信息');
-    this.reconnectCount < this.maxReconnectCount && (this.shouldReconnect = !0);
+    this.shouldReconnect = true;
+    this.reconnect();
   }
 
   /**
