@@ -140,11 +140,8 @@ export class RoomWatcher {
       this.statusMap.set(roomNum, false);
       this.onStatusChange?.(roomNum, isError ? 'error' : 'end', reason);
       
-      // 如果之前是连接状态，现在断开了，则重新开始轮询
-      if (wasConnected) {
-        this.pollAttempts.set(roomNum, 0);
-        this.scheduleNextPoll(roomNum);
-      }
+      // 修正：无论之前是否连接，都要继续轮询
+      this.scheduleNextPoll(roomNum);
     };
 
     cast.on('close', (code, reason) => {
@@ -191,8 +188,8 @@ export class RoomWatcher {
     if (!this.roomNums.has(roomNum)) return; // 如果房间已被移除，则不安排
 
     const attempts = this.pollAttempts.get(roomNum) || 0;
-    // 首次重试（第二次尝试）间隔5秒，后续间隔5分钟
-    const interval = attempts <= 1 ? 5000 : 300000;
+    // 首次重试（第二次尝试）间隔5秒，后续间隔30秒
+    const interval = attempts <= 1 ? 5000 : 30000;
     
     console.log(`[RoomWatcher] Scheduling next poll for ${roomNum} in ${interval / 1000}s. Attempt: ${attempts}`);
 
