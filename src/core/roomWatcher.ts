@@ -188,8 +188,8 @@ export class RoomWatcher {
     if (!this.roomNums.has(roomNum)) return; // 如果房间已被移除，则不安排
 
     const attempts = this.pollAttempts.get(roomNum) || 0;
-    // 首次重试（第二次尝试）间隔5秒，后续间隔30秒
-    const interval = attempts <= 1 ? 5000 : 30000;
+    // 首次重试（第二次尝试）间隔5秒，后续间隔5min
+    const interval = attempts <= 1 ? 5000 : 300000;
     
     console.log(`[RoomWatcher] Scheduling next poll for ${roomNum} in ${interval / 1000}s. Attempt: ${attempts}`);
 

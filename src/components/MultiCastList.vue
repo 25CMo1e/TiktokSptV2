@@ -3,6 +3,10 @@
     <div class="room-list">
       <div v-for="room in rooms" :key="room.roomNum" class="room-item">
         <div class="room-header">
+          <div class="room-status">
+            <span class="status-indicator" :class="getStatusInfo(room.status).className"></span>
+            <span class="status-text">{{ getStatusInfo(room.status).text }}</span>
+          </div>
           <span class="room-title">{{ room.info.nickname }} - {{ room.info.title }}</span>
           <div class="room-actions">
             <button class="save-btn" @click="saveRoomMessages(room.roomNum)">保存弹幕</button>
@@ -31,6 +35,20 @@ const watcher = new RoomWatcher(manager);
 const rooms = ref<Array<{ roomNum: string; info: any; status?: string }>>([]);
 const newRoomNum = ref('');
 const castListRefs = ref<{ [key: string]: any }>({});
+
+// 获取状态信息
+const getStatusInfo = (status?: string) => {
+  switch (status) {
+    case 'living':
+      return { text: '直播中', className: 'status-living' };
+    case 'connecting':
+      return { text: '连接中', className: 'status-connecting' };
+    case 'end':
+    case 'error':
+    default:
+      return { text: '已下播', className: 'status-end' };
+  }
+};
 
 // 设置 CastList 组件引用
 const setCastListRef = (roomNum: string, el: any) => {
@@ -157,6 +175,39 @@ onUnmounted(() => {
   padding: 8px;
   background-color: #f5f5f5;
   border-bottom: 1px solid #ddd;
+  gap: 8px;
+}
+
+.room-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.status-indicator {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+}
+
+.status-living {
+  background-color: #52c41a; /* antd green */
+  box-shadow: 0 0 5px #52c41a;
+}
+
+.status-connecting {
+  background-color: #faad14; /* antd gold */
+  animation: pulse 1.5s infinite;
+}
+
+.status-end {
+  background-color: #bfbfbf; /* antd gray */
+}
+
+.status-text {
+  font-size: 12px;
+  font-weight: bold;
 }
 
 .room-title {
@@ -164,6 +215,7 @@ onUnmounted(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  cursor: pointer;
 }
 
 .room-actions {

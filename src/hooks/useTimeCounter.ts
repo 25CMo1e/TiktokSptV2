@@ -47,7 +47,7 @@ const useTimeCounter = function (opt: TimeCounterOptions = {}) {
   const { initValue = 0, mode = 0, fmt = 'hh:mm:ss' } = opt;
 
   let seconds = initValue;
-  let timer: number | null = null;
+  let timer: NodeJS.Timeout | undefined = void 0;
   const text = ref(convertTime(initValue, fmt));
 
   // 计时

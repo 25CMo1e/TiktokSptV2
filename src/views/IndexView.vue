@@ -9,7 +9,9 @@
         :follow-count="followCount"
         :member-count="memberCount"
         :user-count="userCount"
-        :like-count="likeCount" />
+        :like-count="likeCount"
+        :status="liveStatus"
+      />
       <div class="view-left-bottom">
         <div class="view-left-tools">
           <div class="view-left-tool" title="保存弹幕" @click.stop="saveCastToFile">
@@ -100,6 +102,7 @@ const followCount = ref<string | number>('*****');
 const memberCount = ref<string | number>('*****');
 const userCount = ref<string | number>('*****');
 const likeCount = ref<string | number>('*****');
+const liveStatus = ref<RoomStatus>(RoomStatus.END);
 
 // 主要弹幕
 const castRef = useTemplateRef('castEl');
@@ -172,6 +175,22 @@ const setRoomInfo = function (info?: DyLiveInfo) {
   if (info.title) title.value = info.title;
   if (info.avatar) avatar.value = info.avatar;
   if (info.nickname) nickname.value = info.nickname;
+  if (info.status) liveStatus.value = info.status as RoomStatus;
+};
+
+/**
+ * 重置直播间信息
+ */
+const resetRoomInfo = function () {
+  cover.value = '';
+  title.value = '*****';
+  avatar.value = '';
+  nickname.value = '***';
+  followCount.value = '*****';
+  memberCount.value = '*****';
+  userCount.value = '*****';
+  likeCount.value = '*****';
+  liveStatus.value = RoomStatus.END;
 };
 
 /**
@@ -281,6 +300,7 @@ const connectLive = function () {
   try {
     // 清空上一次连接的消息
     clearMessageList();
+    resetRoomInfo();
     CLog.debug('正在连接:', roomNum.value);
     SkMessage.info(`正在连接：${roomNum.value}`);
     const cast = new DyCast(roomNum.value);
@@ -291,6 +311,9 @@ const connectLive = function () {
       connectStatus.value = 1;
       setRoomInfo(info);
       addConsoleMessage('直播间已连接');
+      
+      // 启用自动重连功能
+      cast.setAutoReconnect(true);
     });
     cast.on('error', err => {
       CLog.error('DyCast 连接出错 =>', err);
@@ -302,6 +325,10 @@ const connectLive = function () {
       CLog.info(`DyCast 房间已关闭[${code}] => ${reason}`);
       connectStatus.value = 3;
       setRoomInputStatus(false);
+      // 非重连中导致的关闭，都需要重置状态
+      if (code !== 4004) {
+        liveStatus.value = RoomStatus.END;
+      }
       switch (code) {
         case DyCastCloseCode.NORMAL:
           SkMessage.success('断开成功');
@@ -340,6 +367,32 @@ const connectLive = function () {
       CLog.info('DyCast 重连成功');
       SkMessage.success('房间重连完成');
     });
+    cast.on('statusChange', (oldStatus, newStatus) => {
+      CLog.info(`直播间状态变化: ${oldStatus} -> ${newStatus}`);
+      liveStatus.value = newStatus;
+
+      const getStatusText = (status: RoomStatus) => {
+        switch (status) {
+          case RoomStatus.PREPARE:
+            return '准备中';
+          case RoomStatus.LIVING:
+            return '直播中';
+          case RoomStatus.PAUSE:
+          case RoomStatus.END:
+            return '已下播';
+          default:
+            return '未知';
+        }
+      };
+      
+      const oldText = getStatusText(oldStatus);
+      const newText = getStatusText(newStatus);
+
+      if (oldText !== newText) {
+        SkMessage.info(`直播间状态: ${newText}`);
+        addConsoleMessage(`直播间状态变化: ${oldText} -> ${newText}`);
+      }
+    });
     cast.connect();
     castWs = cast;
   } catch (err) {
@@ -352,6 +405,7 @@ const connectLive = function () {
 /** 断开连接 */
 const disconnectLive = function () {
   if (castWs) castWs.close(1000, '断开连接');
+  resetRoomInfo();
 };
 
 /** 连接转发房间 */

@@ -229,7 +229,7 @@ export function debounce<T extends (...args: any) => any>(
     lastThis: any,
     maxWait: number = 0,
     result: DebouncedFunc<T>,
-    timerId: number | undefined,
+    timerId: NodeJS.Timeout | undefined = void 0,
     lastCallTime: number | undefined,
     lastInvokeTime = 0,
     leading = false,

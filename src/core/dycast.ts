@@ -392,7 +392,7 @@ export class DyCast {
   // 即 如果 10000 ms 内都没接收到新消息，证明消息接收出错
   private downgradePingCount: number = 2;
 
-  private pingTimer: number | undefined = void 0;
+  private pingTimer: NodeJS.Timeout | undefined = void 0;
 
   // 上次接收时间
   private lastReceiveTime: number;
@@ -410,13 +410,16 @@ export class DyCast {
   private reconnectCount: number;
   /** 最大重连尝试次数 */
   private maxReconnectCount: number;
-  // 是否需要重连
-  private shouldReconnect: boolean;
   // 正在重连中
   private isReconnecting: boolean;
 
   // 订阅者
   private emitter: Emitter<DyCastEvent>;
+
+  // 添加自动重连相关属性
+  private autoReconnectCheckTimer: NodeJS.Timeout | undefined = void 0;
+  private autoReconnectCheckCount: number = 0;
+  private enableAutoReconnect: boolean = true;
 
   constructor(roomNum: string) {
     // 初始化
@@ -439,7 +442,6 @@ export class DyCast {
     this.lastReceiveTime = Date.now();
     // 当前客户端状态
     this.wsRoomStatus = WSRoomStatus.UNCONNECTED;
-    this.shouldReconnect = !1;
     /**
      * 默认情况
      *  - 即未收到预期的状态码
@@ -458,6 +460,8 @@ export class DyCast {
     this.status = RoomStatus.END;
     this.emitter = new Emitter<DyCastEvent>();
     this.isReconnecting = false;
+    this.enableAutoReconnect = true;
+    this.autoReconnectCheckCount = 0;
   }
 
   /**
@@ -582,6 +586,7 @@ export class DyCast {
   private handleClose(ev: CloseEvent) {
     let { code, reason } = ev;
     let msg: string = reason.toString();
+    CLog.info(`[Reconnect-Debug] handleClose 触发, Code: ${code}, Reason: ${msg}`);
     switch (code) {
       case DyCastCloseCode.NO_STATUS:
       case DyCastCloseCode.ABNORMAL:
@@ -591,17 +596,28 @@ export class DyCast {
     }
     this._afterClose();
     
-    // 如果是主播未开播导致的关闭，等待 WebSocket 事件
+    // 如果是主播未开播导致的关闭，启动自动重连检测
     if (code === DyCastCloseCode.LIVE_END) {
       this.wsRoomStatus = WSRoomStatus.CLOSED;
       this.emitter.emit('close', code, msg);
+      // 启动自动重连检测
+      CLog.info('[Reconnect-Debug] LIVE_END, 准备启动定时检查...');
+      this.autoReconnectCheckCount = 0;
+      this.startAutoReconnectCheck();
     } else if (code !== DyCastCloseCode.NORMAL) {
       // 其他非正常关闭，等待 WebSocket 事件
       this.wsRoomStatus = WSRoomStatus.CLOSED;
       this.emitter.emit('close', code, msg);
+      // 启动自动重连检测
+      CLog.info(`[Reconnect-Debug] 非正常关闭 (Code: ${code}), 准备启动定时检查...`);
+      this.autoReconnectCheckCount = 0;
+      this.startAutoReconnectCheck();
     } else {
       // 正常关闭
       this.emitter.emit('close', code, msg);
+      // 正常关闭时停止自动重连检测
+      CLog.info('[Reconnect-Debug] 正常关闭, 停止定时检查。');
+      this.stopAutoReconnectCheck();
     }
   }
 
@@ -628,9 +644,8 @@ export class DyCast {
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
         this.ws.send(ack);
       } else {
-        // 重连
-        CLog.error(`ACK发送异常 => 直播间[${this.roomNum}]已关闭`);
-        this._afterClose();
+        // 连接已关闭，ACK无需发送，等待 handleClose 处理后续
+        CLog.error(`ACK发送异常 => 直播间[${this.roomNum}]连接已关闭，ACK无需发送`);
       }
     }
     // 处理消息体
@@ -638,7 +653,9 @@ export class DyCast {
       // 判断消息体类型
       if (frame.payloadType === PayloadType.Msg) {
         console.log('处理消息体:', response.messages);
-        this._dealMessages(response.messages);
+        if (response.messages) {
+          this._dealMessages(response.messages);
+        }
       }
       if (frame.payloadType === PayloadType.Close) {
         // 关闭连接
@@ -651,30 +668,66 @@ export class DyCast {
    * 重连
    */
   private reconnect() {
-    // 还未关闭
+    // Stop any polling checks, as we are now actively trying to reconnect.
+    this.stopAutoReconnectCheck();
+    
+    // if a reconnect sequence is already in progress, don't start a new one
+    if (this.isReconnecting) {
+        CLog.warn('[Reconnect-Debug] reconnect() 调用, 但 isReconnecting 为 true, 已跳过。');
+        return;
+    }
+    CLog.info('[Reconnect-Debug] reconnect() 调用, 开始重连流程。');
+    // Close existing connection if any
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.close(DyCastCloseCode.RECONNECTING, '因重连而关闭');
     }
     
+    this.reconnectCount = 0;
+    this.isReconnecting = true;
+    this._attemptReconnect();
+  }
+
+  private _attemptReconnect() {
     this.reconnectCount++;
     if (this.reconnectCount > this.maxReconnectCount) {
-      CLog.error('已超过最大重连次数，请稍后重试');
+      CLog.error('[Reconnect-Debug] 已超过最大重连次数，停止重连。');
       this.emitter.emit('error', Error('已超过最大重连次数，请稍后重试'));
+      this.isReconnecting = false;
+      this.wsRoomStatus = WSRoomStatus.CLOSED;
+      this.emitter.emit('close', DyCastCloseCode.CONNECTING_ERROR, '重连失败已达上限');
+      CLog.info('[Reconnect-Debug] 重连达上限，再次启动定时检查...');
+      this.autoReconnectCheckCount = 0;
+      this.startAutoReconnectCheck(); // Allow checking for room status again later
       return;
     }
 
     const delay = this.getReconnectDelay();
-    this.wsRoomStatus = WSRoomStatus.RECONNECTING;
-    this.emitter.emit('reconnecting', this.reconnectCount);
-    
-    // 延迟重连
-    setTimeout(() => {
-      this.isReconnecting = true;
-      const opts: DyCastOptions = Object.assign({}, this.options, {
-        cursor: this.cursor.cursor,
-        internal_ext: this.cursor.internalExt
-      });
-      this._connect(opts);
+    CLog.info(`[Reconnect-Debug] 第 ${this.reconnectCount} 次重连将在 ${delay}ms 后开始...`);
+
+    setTimeout(async () => {
+        this.wsRoomStatus = WSRoomStatus.RECONNECTING;
+        this.emitter.emit('reconnecting', this.reconnectCount);
+        
+        try {
+            CLog.info(`[Reconnect-Debug] 重连尝试 #${this.reconnectCount}: 正在 fetchConnectInfo...`);
+            await this.fetchConnectInfo(this.roomNum);
+            CLog.info(`[Reconnect-Debug] 重连尝试 #${this.reconnectCount}: fetchConnectInfo 成功, isLiving: ${this.isLiving()}`);
+
+            if (this.isLiving()) {
+                const params = this.getWssParam();
+                CLog.info(`[Reconnect-Debug] 重连尝试 #${this.reconnectCount}: 主播在线, 准备 _connect...`);
+                this._connect(params);
+            } else {
+                CLog.warn(`[Reconnect-Debug] 重连尝试 #${this.reconnectCount}: 主播未开播, 放弃本次重连, 等待下次自动检查`);
+                this.isReconnecting = false;
+                this.wsRoomStatus = WSRoomStatus.CLOSED;
+                this.emitter.emit('close', DyCastCloseCode.LIVE_END, '主播未开播');
+                this.startAutoReconnectCheck();
+            }
+        } catch (err) {
+            CLog.error(`[Reconnect-Debug] 重连尝试 #${this.reconnectCount} 失败:`, err);
+            this._attemptReconnect();
+        }
     }, delay);
   }
 
@@ -688,6 +741,10 @@ export class DyCast {
       // 无需传 code，因为抖音弹幕ws服务端并不会处理关闭帧
       this.ws.close();
       this.ws = void 0;
+    }
+    // 如果是手动关闭，停止自动重连检测
+    if (code === DyCastCloseCode.NORMAL) {
+      this.stopAutoReconnectCheck();
     }
   }
 
@@ -727,7 +784,7 @@ export class DyCast {
     CLog.error(`DyCast Cannot Receive Message => after ${tmp} ms`);
     // 重连
     this.emitter.emit('reconnecting', this.reconnectCount, DyCastCloseCode.CANNOT_RECEIVE, '客户端无法正常接收信息');
-    this.shouldReconnect = true;
+    CLog.info('[Reconnect-Debug] cannotReceiveMessage, 触发重连。');
     this.reconnect();
   }
 
@@ -754,7 +811,8 @@ export class DyCast {
     for (let i = 0; i < messages.length; i++) {
       const msg = messages[i];
       const data = await this._dealMessage(msg);
-      if (data) {
+      
+      if (data && this.isDisplayableMessage(data)) {
         // 如果没有时间戳，添加当前时间
         if (data.timestamp === undefined) {
           data.timestamp = Date.now();
@@ -765,6 +823,33 @@ export class DyCast {
     console.log('处理完成的消息列表:', list);
     if (list.length) {
       this.emitter.emit('message', list);
+    }
+  }
+
+  /**
+   * 判断消息是否应该在UI上显示
+   * @param msg 
+   */
+  private isDisplayableMessage(msg: DyMessage): boolean {
+    switch (msg.method) {
+        case CastMethod.CHAT:
+        case CastMethod.GIFT:
+        case CastMethod.LIKE:
+        case CastMethod.MEMBER:
+        case CastMethod.SOCIAL:
+        case CastMethod.EMOJI_CHAT:
+        case CastMethod.CONTROL:
+            return true;
+        
+        // 以下为内部统计或排名消息，不应直接显示
+        case CastMethod.ROOM_USER_SEQ:
+        case CastMethod.ROOM_RANK:
+        case CastMethod.ROOM_STATS:
+            return false;
+
+        // 默认放行未知的新类型
+        default:
+            return true;
     }
   }
 
@@ -850,6 +935,9 @@ export class DyCast {
             this.emitter.emit('statusChange', oldStatus, newStatus);
             // 执行钩子命令
             this._executeHooks(oldStatus, newStatus);
+            
+            // 处理状态变化的重连逻辑
+            this._handleStatusChangeReconnect(oldStatus, newStatus);
           }
           data.room = { status: newStatus };
           break;
@@ -1074,8 +1162,11 @@ export class DyCast {
   private _afterOpen() {
     this.state = !0;
     this.wsRoomStatus = WSRoomStatus.CONNECTED;
+    CLog.info(`[Reconnect-Debug] _afterOpen: isReconnecting 重置为 false, reconnectCount 重置为 0`);
     this.isReconnecting = false;
     this.reconnectCount = 0;
+    // 连接成功后停止自动重连检测
+    this.stopAutoReconnectCheck();
   }
 
   /**
@@ -1228,6 +1319,117 @@ export class DyCast {
       });
     } catch (err) {
       console.error('执行命令失败:', err);
+    }
+  }
+
+  /**
+   * 获取重连延迟时间
+   * @returns 延迟时间（毫秒）
+   */
+  private getReconnectDelay(): number {
+    // 统一重连/重试策略: 第一次尝试等待5秒，之后都等待30秒
+    const interval = this.reconnectCount <= 1 ? 5000 : 30000;
+    return interval;
+  }
+
+  /**
+   * 启动自动重连检测
+   */
+  private startAutoReconnectCheck(): void {
+    if (!this.enableAutoReconnect || this.autoReconnectCheckTimer) {
+      if(this.autoReconnectCheckTimer) CLog.warn('[Reconnect-Debug] startAutoReconnectCheck 调用, 但定时器已存在, 已跳过。');
+      return;
+    }
+    
+    CLog.info(`[Reconnect-Debug] startAutoReconnectCheck: 启动轮询检查...`);
+    this._scheduleNextAutoReconnectCheck();
+  }
+
+  private _scheduleNextAutoReconnectCheck(): void {
+    if (this.autoReconnectCheckTimer) {
+      clearTimeout(this.autoReconnectCheckTimer);
+      this.autoReconnectCheckTimer = undefined;
+    }
+
+    this.autoReconnectCheckCount++;
+    const interval = this.autoReconnectCheckCount === 1 ? 5000 : 300000;
+    CLog.info(`[Reconnect-Debug] 下一次轮询将在 ${interval}ms 后进行 (第 ${this.autoReconnectCheckCount} 次检查).`);
+
+    this.autoReconnectCheckTimer = setTimeout(async () => {
+      CLog.info('[Reconnect-Debug] 轮询触发: 检查连接状态...');
+      if (this.wsRoomStatus === WSRoomStatus.CLOSED && !this.isReconnecting) {
+        try {
+          CLog.info(`[Reconnect-Debug] 轮询: 正在检查直播间 ${this.roomNum} ...`);
+          await this.fetchConnectInfo(this.roomNum);
+
+          if (this.isLiving()) {
+            CLog.info(`[Reconnect-Debug] 轮询: 直播间已开播，将停止轮询并开始重连.`);
+            this.reconnect();
+          } else {
+            CLog.info(`[Reconnect-Debug] 轮询: 直播间仍未开播，安排下一次检查.`);
+            this._scheduleNextAutoReconnectCheck();
+          }
+        } catch (err) {
+          CLog.warn(`[Reconnect-Debug] 轮询: 检查失败，将安排下一次检查:`, err);
+          this._scheduleNextAutoReconnectCheck();
+        }
+      } else {
+        CLog.warn(`[Reconnect-Debug] 轮询触发, 但无需检查 (Status: ${this.wsRoomStatus}, isReconnecting: ${this.isReconnecting}). 轮询将停止。`);
+        this.stopAutoReconnectCheck();
+      }
+    }, interval);
+  }
+
+  /**
+   * 停止自动重连检测
+   */
+  private stopAutoReconnectCheck(): void {
+    if (this.autoReconnectCheckTimer) {
+      CLog.info('[Reconnect-Debug] stopAutoReconnectCheck: 轮询定时器已清除。');
+      clearTimeout(this.autoReconnectCheckTimer);
+      this.autoReconnectCheckTimer = void 0;
+      this.autoReconnectCheckCount = 0;
+    }
+  }
+
+  /**
+   * 设置是否启用自动重连
+   * @param enable 是否启用
+   */
+  public setAutoReconnect(enable: boolean): void {
+    this.enableAutoReconnect = enable;
+    if (!enable) {
+      this.stopAutoReconnectCheck();
+    }
+  }
+
+  /**
+   * 处理状态变化的重连逻辑
+   * @param oldStatus 旧状态
+   * @param newStatus 新状态
+   */
+  private _handleStatusChangeReconnect(oldStatus: RoomStatus, newStatus: RoomStatus) {
+    CLog.info(`[Reconnect-Debug] _handleStatusChangeReconnect: ${oldStatus} -> ${newStatus}`);
+    
+    // 如果直播状态从"直播中"变为"暂停"或"已下播"，
+    // 我们应该将当前会话视为已结束。我们将主动关闭连接，
+    // 这将触发我们的轮询机制，以检查直播是否重新上线。
+    if (oldStatus === RoomStatus.LIVING && (newStatus === RoomStatus.END || newStatus === RoomStatus.PAUSE)) {
+      CLog.info(`[Reconnect-Debug] 状态变化: 从[开播]到[${newStatus === RoomStatus.END ? '下播' : '暂停'}], 主动关闭连接以启动轮询...`);
+      this.close(DyCastCloseCode.LIVE_END, '主播已下播或暂停');
+    }
+    
+    // 此情况处理从非直播到直播的直接状态更改。
+    // 如果连接保持活动状态并且状态更新消息通过，则可能发生这种情况。
+    // 它是等待轮询器的更快替代方案。
+    else if (oldStatus !== RoomStatus.LIVING && newStatus === RoomStatus.LIVING) {
+      if (this.wsRoomStatus === WSRoomStatus.CLOSED && !this.isReconnecting) {
+        CLog.info(`[Reconnect-Debug] 状态变化: 从[非开播]到[开播] (连接已关闭), 触发重连...`);
+        this.reconnectCount = 0; // 重置重连次数
+        this.reconnect();
+      } else {
+        CLog.warn(`[Reconnect-Debug] 状态变化: 从[非开播]到[开播], 但不满足重连条件 (Status: ${this.wsRoomStatus}, isReconnecting: ${this.isReconnecting})`);
+      }
     }
   }
 }

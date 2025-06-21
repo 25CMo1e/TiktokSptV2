@@ -14,6 +14,7 @@
         <img :src="cover" alt="封面" @load="handleCoverLoaded" @error="handleCoverError" />
         <span>{{ coverLoadingTip }}</span>
       </div>
+      <div class="info-status" :class="statusClass">{{ statusText }}</div>
       <label class="live-info-title">{{ title }}</label>
     </div>
     <!-- 信息 -->
@@ -30,6 +31,7 @@
 <script setup lang="ts">
 import { computed, onBeforeMount, ref } from 'vue';
 import LiveInfoItem from './LiveInfoItem.vue';
+import { RoomStatus } from '@/core/dycast';
 
 interface LiveInfoProps {
   cover?: string;
@@ -40,6 +42,7 @@ interface LiveInfoProps {
   memberCount?: string | number;
   userCount?: string | number;
   likeCount?: string | number;
+  status?: RoomStatus;
 }
 
 const props = withDefaults(defineProps<LiveInfoProps>(), {
@@ -48,7 +51,8 @@ const props = withDefaults(defineProps<LiveInfoProps>(), {
   followCount: '*****',
   memberCount: '*****',
   userCount: '*****',
-  likeCount: '*****'
+  likeCount: '*****',
+  status: RoomStatus.END
 });
 
 // 封面加载状态
@@ -83,6 +87,34 @@ const handleCoverLoaded = function () {
 const handleCoverError = function () {
   if (props.cover) coverLoadingStatus.value = 3;
 };
+
+const statusText = computed(() => {
+  switch (props.status) {
+    case RoomStatus.LIVING:
+      return '直播中';
+    case RoomStatus.PREPARE:
+      return '准备中';
+    case RoomStatus.PAUSE:
+    case RoomStatus.END:
+      return '已下播';
+    default:
+      return '未知';
+  }
+});
+
+const statusClass = computed(() => {
+  switch (props.status) {
+    case RoomStatus.LIVING:
+      return 'status-living';
+    case RoomStatus.PREPARE:
+      return 'status-prepare';
+    case RoomStatus.PAUSE:
+    case RoomStatus.END:
+      return 'status-end';
+    default:
+      return 'status-unknown';
+  }
+});
 </script>
 
 <style lang="scss" scoped>
@@ -91,6 +123,8 @@ $loadingBgB: #fff;
 $tipColor: #b9b7b5;
 $titleColor: #1e2732;
 $errorText: #e94829;
+$themeColor: #68be8d;
+$skeletonBg: #e9e9e9;
 
 .live-info {
   width: 100%;
@@ -106,6 +140,7 @@ $errorText: #e94829;
     flex-direction: column;
     align-items: center;
     gap: 6px;
+    position: relative;
   }
 }
 
@@ -208,6 +243,31 @@ $errorText: #e94829;
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+
+.info-status {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  padding: 4px 12px;
+  border-radius: 12px;
+  font-size: 14px;
+  color: #fff;
+  font-weight: bold;
+  backdrop-filter: blur(4px);
+  transition: background-color 0.3s ease;
+  z-index: 1;
+
+  &.status-living {
+    background-color: rgba(233, 84, 100, 0.8); // red
+  }
+  &.status-prepare {
+    background-color: rgba(255, 179, 0, 0.8); // orange
+  }
+  &.status-end,
+  &.status-unknown {
+    background-color: rgba(128, 128, 128, 0.8); // gray
+  }
 }
 
 @keyframes skeletonLoading {
