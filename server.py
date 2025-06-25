@@ -12,6 +12,16 @@ RECORDINGS_DIR = "recordings"
 if not os.path.exists(RECORDINGS_DIR):
     os.makedirs(RECORDINGS_DIR)
 
+def escape_newlines(obj):
+    if isinstance(obj, dict):
+        return {k: escape_newlines(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [escape_newlines(i) for i in obj]
+    elif isinstance(obj, str):
+        return obj.replace('\n', '\\n')
+    else:
+        return obj
+
 async def handler(websocket):
     print(f"[{time.ctime()}] New client connected from {websocket.remote_address}")
     try:
@@ -35,7 +45,8 @@ async def handler(websocket):
                     file_path = os.path.join(RECORDINGS_DIR, f"{room_num}.jsonl")
                     with open(file_path, "a", encoding="utf-8") as f:
                         for cast in room_casts:
-                            f.write(json.dumps(cast, ensure_ascii=False) + "\\n")
+                            safe_cast = escape_newlines(cast)
+                            f.write(json.dumps(safe_cast, ensure_ascii=False) + "\n")
                     
                     if VERBOSE_LOGGING:
                         print(f"[{time.ctime()}] Recorded {len(room_casts)} casts for room {room_num}")
