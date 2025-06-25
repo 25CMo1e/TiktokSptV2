@@ -71,7 +71,7 @@ import {
   type LiveRoom
 } from '@/core/dycast';
 import { verifyRoomNum, verifyWsUrl } from '@/utils/verifyUtil';
-import { ref, useTemplateRef } from 'vue';
+import { ref, useTemplateRef, onMounted, onUnmounted } from 'vue';
 import { CLog } from '@/utils/logUtil';
 import { getId } from '@/utils/idUtil';
 import { RelayCast } from '@/core/relay';
@@ -79,6 +79,8 @@ import SkMessage from '@/components/Message';
 import { formatDate } from '@/utils/commonUtil';
 import FileSaver from '@/utils/fileUtil';
 
+// 本地存储的 Key
+const LOCAL_STORAGE_KEY = 'dy-casts-autosave';
 // 连接状态
 const connectStatus = ref<ConnectStatus>(0);
 // 转发状态
@@ -116,6 +118,9 @@ const castSet = new Set<string>();
 let castWs: DyCast | undefined;
 // 转发客户端
 let relayWs: RelayCast | undefined;
+
+/** 自动保存定时器ID */
+let autoSaveTimer: number | undefined;
 
 /**
  * 验证房间号
@@ -460,14 +465,29 @@ const saveCastToFile = function () {
     SkMessage.warning('请断开连接后再保存');
     return;
   }
-  const len = allCasts.length;
+
+  // 合并内存中和浏览器缓存中的弹幕
+  let finalCasts: DyMessage[] = [];
+  try {
+    const savedCastsJSON = localStorage.getItem(LOCAL_STORAGE_KEY);
+    if (savedCastsJSON) {
+      finalCasts = JSON.parse(savedCastsJSON);
+    }
+  } catch (e) {
+    CLog.error('加载本地缓存弹幕失败', e);
+    SkMessage.error('加载本地缓存弹幕失败，可能需要手动清除浏览器缓存');
+  }
+  // 合并当前内存中的弹幕
+  finalCasts.push(...allCasts);
+
+  const len = finalCasts.length;
   if (len <= 0) {
     SkMessage.warning('暂无弹幕需要保存');
     return;
   }
   const date = formatDate(new Date(), 'yyyy-MM-dd_HHmmss');
   const fileName = `[${roomNum.value}]${date}(${len})`;
-  const data = JSON.stringify(allCasts, null, 2);
+  const data = JSON.stringify(finalCasts, null, 2);
   FileSaver.save(data, {
     name: fileName,
     ext: '.json',
@@ -477,7 +497,9 @@ const saveCastToFile = function () {
   })
     .then(res => {
       if (res.success) {
-        SkMessage.success('弹幕保存成功');
+        SkMessage.success('弹幕保存成功，已包含所有自动备份的弹幕');
+        // 保存成功后，只清除浏览器缓存中的备份，不清空内存和屏幕
+        localStorage.removeItem(LOCAL_STORAGE_KEY);
       } else {
         SkMessage.error('弹幕保存失败');
         CLog.error('弹幕保存失败 =>', res.message);
@@ -488,6 +510,64 @@ const saveCastToFile = function () {
       CLog.error('弹幕保存出错了 =>', err);
     });
 };
+
+/** 自动将弹幕备份到浏览器本地存储 */
+const autoSaveToLocalStorage = () => {
+  // 诊断日志：检查定时器是否触发，以及当时内存中的弹幕数量
+  CLog.info(`[自动备份] 定时器触发，检查到内存中待备份弹幕数量为: ${allCasts.length}`);
+
+  if (allCasts.length === 0) return;
+  try {
+    const existing = localStorage.getItem(LOCAL_STORAGE_KEY);
+    const existingCasts = existing ? JSON.parse(existing) : [];
+    const combinedCasts = [...existingCasts, ...allCasts];
+    localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(combinedCasts));
+
+    // 清空内存中的弹幕，UI列表中的不清空，以保持展示
+    allCasts.length = 0;
+    // 使用一个温和的提示告知用户
+    SkMessage.info('弹幕已自动备份');
+    CLog.info(`已自动备份 ${combinedCasts.length} 条弹幕至浏览器缓存`);
+  } catch (e) {
+    CLog.error('自动备份到 localStorage 失败', e);
+    SkMessage.error('自动备份弹幕失败，浏览器存储空间可能已满');
+    // 如果存储失败，停止定时器，防止反复失败
+    if (autoSaveTimer) {
+      clearInterval(autoSaveTimer);
+      autoSaveTimer = undefined;
+    }
+  }
+};
+
+onMounted(() => {
+  console.log('[DEBUG] 组件已挂载(onMounted)。准备设置自动备份定时器...');
+  // 检查是否有上次未保存的弹幕
+  try {
+    const savedCasts = localStorage.getItem(LOCAL_STORAGE_KEY);
+    if (savedCasts) {
+      const parsedCasts = JSON.parse(savedCasts);
+      if (Array.isArray(parsedCasts) && parsedCasts.length > 0) {
+        SkMessage.info(`发现 ${parsedCasts.length} 条未导出的弹幕，点击"保存弹幕"按钮可一并导出。`);
+      }
+    }
+  } catch (e) {
+    CLog.error('加载本地缓存弹幕失败', e);
+    // 清理可能已损坏的数据
+    localStorage.removeItem(LOCAL_STORAGE_KEY);
+  }
+
+  // 每小时自动保存一次, 你可以改为20000(20秒)测试
+  autoSaveTimer = window.setInterval(autoSaveToLocalStorage, 20000);
+  console.log('[DEBUG] 定时器已设置。ID:', autoSaveTimer);
+});
+
+onUnmounted(() => {
+  console.log('[DEBUG] 组件已卸载(onUnmounted)。准备清除定时器。ID:', autoSaveTimer);
+  if (autoSaveTimer) {
+    clearInterval(autoSaveTimer);
+    autoSaveTimer = undefined;
+  }
+});
 </script>
 
 <style lang="scss" scoped>

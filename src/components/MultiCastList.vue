@@ -9,7 +9,6 @@
           </div>
           <span class="room-title">{{ room.info.nickname }} - {{ room.info.title }}</span>
           <div class="room-actions">
-            <button class="save-btn" @click="saveRoomMessages(room.roomNum)">保存弹幕</button>
             <button class="close-btn" @click="removeRoom(room.roomNum)">关闭</button>
           </div>
         </div>
@@ -27,14 +26,20 @@
 import { ref, onMounted, onUnmounted } from 'vue';
 import { DyCastManager } from '@/core/dycast';
 import CastList from './CastList.vue';
-import type { DyMessage } from '@/core/dycast';
+import type { DyMessage, LiveRoom } from '@/core/dycast';
 import { RoomWatcher } from '@/core/roomWatcher';
+import { CLog } from '@/utils/logUtil';
+import SkMessage from '@/components/Message';
+import { formatDate } from '@/utils/commonUtil';
 
 const manager = new DyCastManager();
 const watcher = new RoomWatcher(manager);
 const rooms = ref<Array<{ roomNum: string; info: any; status?: string }>>([]);
 const newRoomNum = ref('');
 const castListRefs = ref<{ [key: string]: any }>({});
+
+// 用于连接后端录制服务的 WebSocket
+let recorderWs: WebSocket | null = null;
 
 // 获取状态信息
 const getStatusInfo = (status?: string) => {
@@ -79,39 +84,34 @@ watcher.setStatusChangeCallback((roomNum, status, info) => {
   }
 });
 
-// 保存房间弹幕
-const saveRoomMessages = (roomNum: string) => {
-  const castList = castListRefs.value[roomNum];
-  if (!castList) return;
-  const room = rooms.value.find(r => r.roomNum === roomNum);
-  if (!room) return;
-  const messages = castList.getAllCasts();
-  const data = JSON.stringify(messages, null, 2);
-  const blob = new Blob([data], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `[${roomNum}]${new Date().toISOString().replace(/[:.]/g, '-')}(${messages.length}).json`;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
-};
-
 // 处理弹幕消息
 const handleMessage = (messages: DyMessage[]) => {
-  console.log('收到消息:', messages);
-  // 找到对应的 CastList 组件并添加消息
   const roomNum = messages[0]?.roomNum;
-  console.log('房间号:', roomNum);
-  console.log('当前房间列表:', rooms.value);
-  console.log('CastList引用:', castListRefs.value);
-  
-  if (roomNum && castListRefs.value[roomNum]) {
-    console.log('找到对应的CastList组件，添加消息');
-    castListRefs.value[roomNum].appendCasts(messages);
+  if (!roomNum) return; // 如果消息没有房间号，则直接忽略
+
+  // 检查该房间是否仍在我们的监控列表中
+  const isRoomActive = rooms.value.some(r => r.roomNum === roomNum);
+
+  // 1. 如果房间是活动的，则更新UI
+  if (isRoomActive) {
+    const castList = castListRefs.value[roomNum];
+    if (castList) {
+      castList.appendCasts(messages);
+    } else {
+      CLog.warn('未找到对应的CastList组件', messages);
+    }
+  }
+
+  // 2. 同样，只有当房间是活动的，才将弹幕发送给后端录制服务
+  if (isRoomActive && recorderWs && recorderWs.readyState === WebSocket.OPEN) {
+    recorderWs.send(JSON.stringify(messages));
   } else {
-    console.log('未找到对应的CastList组件');
+    // 如果房间已关闭，可以在这里打印一条调试日志
+    if (!isRoomActive) {
+      CLog.info(`已忽略来自已关闭房间 ${roomNum} 的消息`);
+    } else {
+      CLog.error('录制服务WebSocket未连接，无法发送弹幕');
+    }
   }
 };
 
@@ -131,14 +131,48 @@ const removeRoom = (roomNum: string) => {
   delete castListRefs.value[roomNum];
 };
 
+// 连接到后端录制服务
+const connectRecorder = () => {
+  const wsUrl = 'ws://localhost:8765';
+  recorderWs = new WebSocket(wsUrl);
+
+  recorderWs.onopen = () => {
+    CLog.info('成功连接到本地录制服务');
+    SkMessage.success('已连接到录制服务，将自动保存弹幕');
+  };
+
+  recorderWs.onmessage = (event) => {
+    // 后端现在不回传消息，但保留以备将来扩展
+    CLog.info('收到录制服务消息:', event.data);
+  };
+
+  recorderWs.onclose = () => {
+    CLog.warn('与本地录制服务的连接已断开');
+    SkMessage.warning('录制服务已断开，请检查server.py是否在运行');
+    // 可在此处添加自动重连逻辑
+  };
+
+  recorderWs.onerror = (error) => {
+    CLog.error('连接本地录制服务时出错:', error);
+    SkMessage.error('无法连接到录制服务，请确保已启动server.py');
+    recorderWs = null;
+  };
+};
+
 onMounted(() => {
-  // 监听弹幕消息事件
+  // 监听来自抖音的弹幕消息
   manager.on('message', handleMessage);
+  // 连接到我们自己的后端录制服务
+  connectRecorder();
 });
 
 onUnmounted(() => {
   manager.closeAll();
   manager.off('message', handleMessage);
+  // 关闭与录制服务的连接
+  if (recorderWs) {
+    recorderWs.close();
+  }
 });
 </script>
 
@@ -221,19 +255,6 @@ onUnmounted(() => {
 .room-actions {
   display: flex;
   gap: 8px;
-}
-
-.save-btn {
-  padding: 4px 8px;
-  background-color: #1890ff;
-  color: white;
-  border: none;
-  border-radius: 4px;
-  cursor: pointer;
-}
-
-.save-btn:hover {
-  background-color: #40a9ff;
 }
 
 .close-btn {

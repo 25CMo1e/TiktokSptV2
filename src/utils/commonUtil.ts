@@ -39,3 +39,13 @@ export const formatDate = function (date: Date, format: string = 'HH:mm') {
   }
   return format;
 };
+
+/**
+ * 生成随机 userId（仿照对方项目，范围可调整）
+ */
+export function generateUserId(): string {
+  // 抖音 user_unique_id 通常为 19 位数字，这里仿照对方项目范围
+  const min = 7200000000000000000;
+  const max = 7400000000000000000;
+  return Math.floor(Math.random() * (max - min) + min).toString();
+}

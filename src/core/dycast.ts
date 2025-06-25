@@ -26,6 +26,7 @@ import type {
 } from './model';
 import { getImInfo, getLiveInfo } from './request';
 import { getSignature } from './signature';
+import { generateUserId } from '@/utils/commonUtil';
 
 /**
  * 连接状态
@@ -421,6 +422,16 @@ export class DyCast {
   private autoReconnectCheckCount: number = 0;
   private enableAutoReconnect: boolean = true;
 
+  /** 可选的 ws 地址池 */
+  private wsUrlPool: string[] = [
+    'wss://webcast5-ws-web-lq.douyin.com/webcast/im/push/v2/'
+    // 可扩展更多备用地址
+  ];
+  /** 当前 userId */
+  private userUniqueId: string = '';
+  /** 当前签名 */
+  private signature: string = '';
+
   constructor(roomNum: string) {
     // 初始化
     this.roomNum = roomNum;
@@ -701,18 +712,19 @@ export class DyCast {
       return;
     }
 
+    // 每次重连前刷新参数
+    this.updateSignature();
+
     const delay = this.getReconnectDelay();
     CLog.info(`[Reconnect-Debug] 第 ${this.reconnectCount} 次重连将在 ${delay}ms 后开始...`);
 
     setTimeout(async () => {
         this.wsRoomStatus = WSRoomStatus.RECONNECTING;
         this.emitter.emit('reconnecting', this.reconnectCount);
-        
         try {
             CLog.info(`[Reconnect-Debug] 重连尝试 #${this.reconnectCount}: 正在 fetchConnectInfo...`);
             await this.fetchConnectInfo(this.roomNum);
             CLog.info(`[Reconnect-Debug] 重连尝试 #${this.reconnectCount}: fetchConnectInfo 成功, isLiving: ${this.isLiving()}`);
-
             if (this.isLiving()) {
                 const params = this.getWssParam();
                 CLog.info(`[Reconnect-Debug] 重连尝试 #${this.reconnectCount}: 主播在线, 准备 _connect...`);
@@ -1211,11 +1223,33 @@ export class DyCast {
   }
 
   /**
-   * 整理连接参数对象
+   * 重连前刷新参数（userUniqueId、ws地址、签名）
+   */
+  private updateSignature() {
+    // 1. 随机 ws 地址
+    if (this.wsUrlPool.length > 0) {
+      const idx = Math.floor(Math.random() * this.wsUrlPool.length);
+      this.url = this.wsUrlPool[idx];
+    }
+    // 2. 生成新的 userId
+    this.userUniqueId = generateUserId();
+    // 3. 生成新的签名
+    if (this.info && this.info.roomId && this.userUniqueId) {
+      this.signature = getSignature(this.info.roomId, this.userUniqueId);
+    }
+    // 4. 更新 info 里的 uniqueId
+    if (this.info) {
+      this.info.uniqueId = this.userUniqueId;
+    }
+  }
+
+  /**
+   * 整理连接参数对象，使用最新的 userUniqueId 和签名
    */
   private getWssParam(): DyCastOptions {
-    const { roomId, uniqueId } = this.info;
-    const sign = getSignature(roomId, uniqueId);
+    const { roomId } = this.info;
+    const uniqueId = this.userUniqueId || this.info.uniqueId;
+    const sign = this.signature || getSignature(roomId, uniqueId);
     return {
       room_id: roomId,
       user_unique_id: uniqueId,
