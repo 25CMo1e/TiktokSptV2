@@ -41,6 +41,8 @@ const castListRefs = ref<{ [key: string]: any }>({});
 // 用于连接后端录制服务的 WebSocket
 let recorderWs: WebSocket | null = null;
 
+let statusSyncTimer: number | undefined = undefined;
+
 // 获取状态信息
 const getStatusInfo = (status?: string) => {
   switch (status) {
@@ -97,6 +99,11 @@ const handleMessage = (messages: DyMessage[]) => {
     const castList = castListRefs.value[roomNum];
     if (castList) {
       castList.appendCasts(messages);
+      // 如果UI状态不是"直播中"，强制修正
+      const room = rooms.value.find(r => r.roomNum === roomNum);
+      if (room && room.status !== 'living') {
+        room.status = 'living';
+      }
     } else {
       CLog.warn('未找到对应的CastList组件', messages);
     }
@@ -160,19 +167,30 @@ const connectRecorder = () => {
 };
 
 onMounted(() => {
-  // 监听来自抖音的弹幕消息
   manager.on('message', handleMessage);
-  // 连接到我们自己的后端录制服务
   connectRecorder();
+
+  // 定时同步底层状态到UI
+  statusSyncTimer = window.setInterval(() => {
+    rooms.value.forEach(room => {
+      const cast = manager.getRoom(room.roomNum);
+      if (cast) {
+        // 这里假设 cast.isLiving() 返回 true/false
+        if (cast.isLiving && cast.isLiving() && room.status !== 'living') {
+          room.status = 'living';
+        } else if (cast.isLiving && !cast.isLiving() && room.status === 'living') {
+          room.status = 'end';
+        }
+      }min
+    });
+  }, 300000); // 每5min同步一次
 });
 
 onUnmounted(() => {
   manager.closeAll();
   manager.off('message', handleMessage);
-  // 关闭与录制服务的连接
-  if (recorderWs) {
-    recorderWs.close();
-  }
+  if (recorderWs) recorderWs.close();
+  if (statusSyncTimer) clearInterval(statusSyncTimer);
 });
 </script>
 
